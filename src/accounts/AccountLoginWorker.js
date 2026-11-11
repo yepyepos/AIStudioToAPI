@@ -199,8 +199,8 @@ async function validateStudio(credentials) {
             readySince = null;
             stepDeadline = nextStep();
         }
-        // The recognized survey owns one bounded budget, independent of terms.
-        if (await handlers.skipOnboarding()) {
+        // Both recognized surveys own one bounded budget, independent of terms.
+        if ((await handlers.skipOnboarding()) || (await handlers.skipWelcome(stepDeadline))) {
             readySince = null;
             stepDeadline = nextStep();
         }

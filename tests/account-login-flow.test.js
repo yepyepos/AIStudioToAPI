@@ -22,17 +22,19 @@ async function simulate(options = {}) {
         screenshots = [],
         dialogObservations = [];
     const visible = selector =>
-        selector.includes("textarea")
-            ? state === "studio"
-            : selector.includes('type="email"')
-              ? state === "email"
-              : selector.includes('type="password"')
-                ? state === "password"
-                : selector.includes("totpPin")
-                  ? state === "totp"
-                  : selector.includes("challengetype")
-                    ? state === "choose"
-                    : false;
+        state === "welcome"
+            ? false
+            : selector.includes("textarea")
+              ? state === "studio"
+              : selector.includes('type="email"')
+                ? state === "email"
+                : selector.includes('type="password"')
+                  ? state === "password"
+                  : selector.includes("totpPin")
+                    ? state === "totp"
+                    : selector.includes("challengetype")
+                      ? state === "choose"
+                      : false;
     const text = () =>
         state === "email"
             ? "Sign in"
@@ -63,7 +65,7 @@ async function simulate(options = {}) {
                 state = options.alternative ? "alternative" : options.choose ? "choose" : "totp";
                 return;
             }
-            state = "studio";
+            state = options.welcomeFlow ? "welcome" : "studio";
             url = "https://aistudio.google.com/prompts/new";
         } else if (state === "totp") {
             if (reentries < (options.reentries || 0)) {
@@ -161,6 +163,7 @@ async function simulate(options = {}) {
             };
             return locator;
         },
+        ready: () => visible('textarea, [contenteditable="true"][role="textbox"]'),
         screenshot: async parameters => {
             screenshots.push(parameters);
             return Buffer.from("synthetic-screenshot");
@@ -264,27 +267,38 @@ async function simulate(options = {}) {
                         }
                       : name === "node:perf_hooks"
                         ? { performance: { now: () => clock - 30000 } }
-                        : name === "./LoginPageHandlers" && options.termsNearDeadline
+                        : name === "./LoginPageHandlers" && options.welcomeFlow
                           ? class extends workerRequire(name) {
-                                async terms(...args) {
-                                    if (this.testTermsCompleted) return super.terms(...args);
-                                    this.testTermsCompleted = true;
-                                    clock += (options.stepTimeout || 30000) - 1;
-                                    this.guard();
-                                    this.termsOutcome = "completed";
-                                    return true;
-                                }
-                                async skipOnboarding(limit) {
-                                    this.guard();
-                                    if (this.testOnboardingCompleted) return false;
-                                    assert.equal(limit, undefined, "survey must not inherit the editor deadline");
-                                    this.testOnboardingCompleted = true;
-                                    clock += 1000;
-                                    this.guard();
+                                async skipWelcome(limit) {
+                                    assert.equal(typeof limit, "number", "welcome shares the current step deadline");
+                                    if (options.welcomeClickPending || this.page.ready()) return false;
+                                    this.phase("aistudio_onboarding");
+                                    if (options.welcomeClickPending) clock += 2000;
+                                    else state = "studio";
                                     return true;
                                 }
                             }
-                          : workerRequire(name),
+                          : name === "./LoginPageHandlers" && options.termsNearDeadline
+                            ? class extends workerRequire(name) {
+                                  async terms(...args) {
+                                      if (this.testTermsCompleted) return super.terms(...args);
+                                      this.testTermsCompleted = true;
+                                      clock += (options.stepTimeout || 30000) - 1;
+                                      this.guard();
+                                      this.termsOutcome = "completed";
+                                      return true;
+                                  }
+                                  async skipOnboarding(limit) {
+                                      this.guard();
+                                      if (this.testOnboardingCompleted) return false;
+                                      assert.equal(limit, undefined, "survey must not inherit the editor deadline");
+                                      this.testOnboardingCompleted = true;
+                                      clock += 1000;
+                                      this.guard();
+                                      return true;
+                                  }
+                              }
+                            : workerRequire(name),
             setTimeout: (callback, ms) =>
                 setImmediate(() => {
                     clock += ms;
@@ -349,6 +363,15 @@ test("no two-step login verifies account and target app before saving complete s
     assert.ok(result.storageState);
     assert.equal(result.email, "user@example.com");
     assert.ok(phases.includes("target_service_initialization"));
+});
+test("new welcome survey is handled before editor readiness", async () => {
+    const handled = await simulate({ welcomeFlow: true });
+    assert.ok(handled.result.storageState, JSON.stringify(handled.result));
+    assert.ok(handled.phases.includes("aistudio_onboarding"));
+});
+test("a welcome that does not navigate cannot reset the editor deadline", async () => {
+    const stalled = await simulate({ welcomeClickPending: true, welcomeFlow: true });
+    assert.equal(stalled.result.error, "page_transition_timeout");
 });
 test("near-limit terms leave independent survey and editor budgets without extending the attempt", async () => {
     const success = await simulate({ termsNearDeadline: true });

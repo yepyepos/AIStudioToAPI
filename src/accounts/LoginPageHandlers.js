@@ -456,6 +456,142 @@ class LoginPageHandlers {
         }
         return false;
     }
+    async skipWelcome(limit = this.deadline) {
+        this.guard();
+        if (this.welcomePage !== this.page) {
+            this.welcomePage = this.page;
+            this.welcomeDeadline = null;
+            this.welcomeClicks = 0;
+        }
+        if (this.page.isClosed()) throw failure("challenge_changed");
+        // The live page renders this survey inside the Studio app shell: the
+        // question is not a heading role, its Skip control sits in the footer,
+        // and the text lives behind shadow roots. Only Playwright locators can
+        // see it, so this uses text locators and never innerText snapshots.
+        const title = /What brings you to Google AI Studio\s*\?/i;
+        const skipName = /^(Skip|跳过|跳過)$/i;
+        const continueName = /^(Continue|继续|繼續)$/i;
+        const survey = /Explore latest models|Develop with Gemini API|Vibe code|Chat with Gemini/i;
+        for (const frame of this.page.frames().slice(0, 10)) {
+            this.guard();
+            let host;
+            try {
+                host = new URL(frame.url()).hostname;
+            } catch {
+                continue;
+            }
+            if (host !== "aistudio.google.com") continue;
+            const heading = frame.getByText(title).filter({ visible: true }).first();
+            if (!(await heading.isVisible().catch(() => false))) continue;
+            this.welcomeDiagnostics = { skipStrategy: "none", source: "welcome" };
+            // The answer list is the survey's own signature; another page that
+            // merely repeats the question must never authorize a click.
+            const answers = frame.getByText(survey).filter({ visible: true });
+            const surveyVisible = async () => {
+                this.guard();
+                if (this.page.isClosed()) throw failure("challenge_changed");
+                const [hasTitle, hasAnswers] = await Promise.all([
+                    heading.isVisible().catch(() => false),
+                    answers
+                        .first()
+                        .isVisible()
+                        .catch(() => false),
+                ]);
+                return hasTitle && hasAnswers;
+            };
+            if (!(await surveyVisible())) continue;
+            // Polling and retries cannot extend this page's operation budget.
+            this.welcomeDeadline ??= Math.min(this.deadline, performance.now() + this.stepTimeout);
+            const end = Math.min(limit, this.deadline, this.welcomeDeadline);
+            const check = () => {
+                this.guard();
+                if (this.page.isClosed()) throw failure("challenge_changed");
+                if (performance.now() >= end) throw Object.assign(failure("onboarding_timeout"), { retryable: true });
+            };
+            try {
+                check();
+                this.phase("aistudio_onboarding");
+                if ((this.welcomeClicks || 0) >= 2)
+                    throw Object.assign(failure("onboarding_timeout"), { retryable: true });
+                // Skip is the only control this handler clicks when present. The
+                // question is re-verified right before the click, so a replaced
+                // page cannot receive it.
+                const controls = [
+                    ["skip_role", frame.getByRole("button", { name: skipName })],
+                    ["skip_text", frame.getByText(skipName, { exact: true })],
+                ];
+                let button = null;
+                for (const [strategy, locator] of controls) {
+                    check();
+                    const visible = locator.filter({ visible: true });
+                    for (let index = 0; index < Math.min(await visible.count().catch(() => 0), 5); index++) {
+                        const candidate = visible.nth(index);
+                        if (!(await candidate.isEnabled().catch(() => true))) continue;
+                        button = candidate;
+                        this.welcomeDiagnostics.skipStrategy = strategy;
+                        break;
+                    }
+                    if (button) break;
+                }
+                if (!button) {
+                    // Continue is disabled until an answer is chosen, so it only
+                    // applies when the page itself offers it enabled.
+                    const fallback = frame
+                        .getByRole("button", { name: continueName })
+                        .filter({ visible: true })
+                        .first();
+                    if (
+                        (await fallback.isVisible().catch(() => false)) &&
+                        (await fallback.isEnabled().catch(() => false))
+                    ) {
+                        button = fallback;
+                        this.welcomeDiagnostics.skipStrategy = "continue";
+                    }
+                }
+                if (!button) {
+                    this.welcomeDiagnostics.skipStrategy = "unavailable";
+                    throw Object.assign(failure("onboarding_timeout"), { retryable: true });
+                }
+                this.operation = "welcome_dismiss";
+                await this.interaction.click(button, {
+                    check: async () => {
+                        if (!(await surveyVisible())) throw failure("challenge_changed");
+                    },
+                    timeout: Math.max(1, Math.floor(end - performance.now())),
+                });
+                this.welcomeClicks = (this.welcomeClicks || 0) + 1;
+                this.operation = "welcome_wait";
+                await this.interaction.operation("wait", async () => {
+                    while (performance.now() < end) {
+                        check();
+                        if (!(await surveyVisible())) {
+                            this.welcomeDiagnostics.dismissed = true;
+                            return;
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    check();
+                });
+                return true;
+            } catch (cause) {
+                this.guard();
+                if (cause.name === "TimeoutError") {
+                    cause.reason = "onboarding_timeout";
+                    cause.retryable = true;
+                }
+                cause.loginOperation = this.operation;
+                cause.operationPart ||= "budget_check";
+                cause.onboardingDiagnostics = {
+                    onboardingClickCount: this.welcomeClicks || 0,
+                    remainingMs: Math.max(0, Math.floor(this.deadline - performance.now())),
+                    stepRemainingMs: Math.max(0, Math.floor(end - performance.now())),
+                    welcome: this.welcomeDiagnostics,
+                };
+                throw cause;
+            }
+        }
+        return false;
+    }
     async observeStudioDialogs(limit = this.deadline) {
         this.guard();
         let observed, timer;

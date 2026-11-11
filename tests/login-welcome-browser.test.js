@@ -179,6 +179,21 @@ test("page closure, cancellation and expiry stop welcome actions safely", { skip
     }
 });
 
+test("failure diagnostics describe the survey without leaking any text", { skip: !executablePath }, async t => {
+    const { handler } = await fixture(t, surveyMarkup());
+    assert.equal(await handler.welcomePresent(), true);
+    const structure = await handler.welcomeStructure();
+    assert.ok(structure.nodes.length > 0, JSON.stringify(structure));
+    const kinds = new Set(structure.nodes.map(node => node.kind));
+    assert.ok(kinds.has("title"));
+    assert.ok(kinds.has("answer"));
+    assert.ok(kinds.has("skip"));
+    assert.ok(structure.nodes.every(node => typeof node.tag === "string" && node.tag.length));
+    const serialised = JSON.stringify(structure);
+    assert.ok(!/What brings you/i.test(serialised));
+    assert.ok(!/Explore latest/i.test(serialised));
+    assert.ok(!/password|user@example/i.test(serialised));
+});
 test(
     "a welcome that does not navigate consumes one fixed budget instead of polling forever",
     { skip: !executablePath },

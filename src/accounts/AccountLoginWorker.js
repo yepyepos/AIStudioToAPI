@@ -721,6 +721,22 @@ process.on("message", input => {
             } catch {
                 /* Diagnostic metadata is best effort and excludes values. */
             }
+            try {
+                // Collected only when this failure involved the new first-run
+                // survey, so ordinary failures never gather extra structure.
+                const surveyFailure =
+                    cause.onboardingDiagnostics?.welcome ||
+                    /welcome/i.test(cause.loginOperation || "") ||
+                    (await handlers.welcomePresent());
+                if (surveyFailure) {
+                    diagnostics.welcomeStructure = await Promise.race([
+                        handlers.welcomeStructure(),
+                        wait(1500).then(() => ({ status: "capture_timeout" })),
+                    ]);
+                }
+            } catch {
+                /* Best effort; the original failure is never replaced. */
+            }
         }
         await complete({
             controls: Array.isArray(controls) ? controls : [],

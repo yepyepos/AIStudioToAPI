@@ -777,6 +777,98 @@ class LoginPageHandlers {
             return Promise.all(editable.map(input => this.pin(input)));
         throw failure("manual_challenge");
     }
+    async welcomePresent() {
+        // Cheap failure-time probe: the survey's answer list is its signature.
+        // Uses text locators so shadow-tree content is still visible to them.
+        try {
+            for (const frame of this.page.frames().slice(0, 10)) {
+                let host;
+                try {
+                    host = new URL(frame.url()).hostname;
+                } catch {
+                    continue;
+                }
+                if (host !== "aistudio.google.com") continue;
+                const answers = frame
+                    .getByText(/Explore latest models|Develop with Gemini API|Vibe code|Chat with Gemini/i)
+                    .filter({ visible: true })
+                    .first();
+                if (await answers.isVisible().catch(() => false)) return true;
+            }
+        } catch {
+            /* Best effort only. */
+        }
+        return false;
+    }
+    async welcomeStructure() {
+        // Failure-time evidence for the first-run survey. Only tags, roles,
+        // shadow-tree placement and fixed presence flags leave the DOM: no text,
+        // labels, attributes, URLs or account data.
+        try {
+            return await this.page.evaluate(() => {
+                const titleProbe = /What brings you to Google AI Studio/i;
+                const answerProbe = /Explore latest models|Develop with Gemini API|Vibe code|Chat with Gemini/i;
+                const skipProbe = /^(Skip|跳过|跳過)$/;
+                const continueProbe = /^(Continue|继续|繼續)$/;
+                const nodes = [];
+                const chain = node => {
+                    const path = [];
+                    let current = node;
+                    for (let depth = 0; current && depth < 8; depth++) {
+                        path.push({
+                            role: current.getAttribute?.("role") || null,
+                            shadow: !!current.getRootNode?.().host,
+                            tag: current.tagName ? current.tagName.toLowerCase() : "unknown",
+                        });
+                        current = current.parentElement || current.getRootNode?.().host || null;
+                    }
+                    return path;
+                };
+                const record = (node, kind, extra = {}) => {
+                    if (nodes.length >= 40) return;
+                    const box = node.getBoundingClientRect();
+                    nodes.push({
+                        area: Math.round(box.width) * Math.round(box.height),
+                        chain: chain(node),
+                        clickable: !!node.closest?.(
+                            'button, a, [role="button"], [tabindex]:not([tabindex="-1"]), [onclick]'
+                        ),
+                        disabled: node.matches?.(":disabled") || node.getAttribute?.("aria-disabled") === "true",
+                        kind,
+                        role: node.getAttribute?.("role") || null,
+                        tag: node.tagName ? node.tagName.toLowerCase() : "unknown",
+                        visible: box.width > 0 && box.height > 0,
+                        ...extra,
+                    });
+                };
+                const walk = root => {
+                    for (const element of root.querySelectorAll("*")) {
+                        if (element.shadowRoot) walk(element.shadowRoot);
+                        const own = [...element.childNodes]
+                            .filter(child => child.nodeType === 3)
+                            .map(child => child.textContent)
+                            .join(" ")
+                            .trim();
+                        if (!own && !element.children.length) continue;
+                        if (titleProbe.test(own)) record(element, "title");
+                        else if (answerProbe.test(own)) record(element, "answer");
+                        else if (skipProbe.test(own)) record(element, "skip");
+                        else if (continueProbe.test(own)) record(element, "continue");
+                        if (nodes.length >= 40) return;
+                    }
+                };
+                walk(document);
+                const shadowHosts = [...document.querySelectorAll("*")].filter(node => node.shadowRoot).length;
+                return {
+                    nodes,
+                    shadowHosts,
+                    titleInShadow: nodes.some(node => node.kind === "title" && node.chain[0].shadow),
+                };
+            });
+        } catch {
+            return { status: "capture_failed" };
+        }
+    }
     async structure() {
         // No arbitrary attributes, body text, labels, URLs or values leave the DOM.
         return this.page.evaluate(() => {
